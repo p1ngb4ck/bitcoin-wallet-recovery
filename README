@@ -1,4 +1,4 @@
-# wallet_carver
+# wallet-rescue
 
 Forensic recovery tool for Bitcoin/Electrum key material from a raw `dd`/`ddrescue`
 image — **even when the filesystem is destroyed/overwritten**.
