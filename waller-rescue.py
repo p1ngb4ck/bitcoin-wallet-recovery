@@ -480,8 +480,11 @@ class Progress:
         self.t0 = time.time()
         self.tlast = 0.0
         self.enabled = enabled
-        self.tty = sys.stderr.isatty()
+        self.label = ""
         self.dirty = False
+
+    def set_label(self, s):
+        self.label = s
 
     def add(self, n):
         self.done += n
@@ -498,30 +501,26 @@ class Progress:
         el = max(1e-6, time.time() - self.t0)
         rate = self.done / el
         eta = (self.total - self.done) / rate if rate > 0 else 0
-        w = 24
+        w = 14
         fill = int(frac * w)
         bar = "#" * fill + "-" * (w - fill)
-        txt = "[%s] %5.1f%%  %6.1f MB/s  ETA %-7s  %s" % (
-            bar, frac * 100, rate / 1e6, _fmt_dur(eta), _fmt_bytes(self.done))
-        if self.tty:
-            sys.stderr.write("\r" + txt.ljust(90))
-            sys.stderr.flush()
-            self.dirty = True
-        else:
-            sys.stderr.write(txt + "\n")
+        # keep it short (fits an 80-col terminal) so it never wraps; \x1b[K clears
+        # leftovers instead of padding -> a single, self-overwriting line
+        txt = "%-12s %3.0f%% [%s] %5.1f MB/s ETA %-6s %s" % (
+            self.label[:12], frac * 100, bar, rate / 1e6, _fmt_dur(eta), _fmt_bytes(self.done))
+        sys.stderr.write("\r" + txt + "\x1b[K")
+        sys.stderr.flush()
+        self.dirty = True
 
     def msg(self, text):
-        if self.tty and self.dirty:
-            sys.stderr.write("\r" + text.ljust(90) + "\n")
-            self.dirty = False
-        else:
-            sys.stderr.write(text + "\n")
+        # clear the bar line, print the message on its own line; the bar re-appears next tick
+        sys.stderr.write("\r\x1b[K" + text + "\n")
+        self.dirty = False
 
     def finish(self):
         if self.enabled:
             self.done = self.total
             self._render()
-        if self.tty and self.dirty:
             sys.stderr.write("\n")
 
 
@@ -683,8 +682,6 @@ class Carver:
                     continue
                 rec = {"kind": "electrum_encrypted", "offset": off,
                        "bytes": len(enc), "status": "ENCRYPTED (no password matched)"}
-                if self.passwords:
-                    self._say("    electrum-bie1: testing %d passwords @%d" % (len(self.passwords), off))
                 for pw in self.passwords:
                     res = electrum_try(enc, pw)
                     if res:
@@ -757,9 +754,6 @@ class Carver:
                         "status": "PLAINTEXT"})
                 return
 
-            if self.passwords:
-                self._say("    electrum-v4: testing %d passwords @%d" % (len(self.passwords), off))
-
             recovered = []
             had_blob = False
             tried = set()
@@ -817,8 +811,6 @@ class Carver:
                    "iterations": iters, "salt_hex": salt.hex(),
                    "status": "ENCRYPTED (no password matched)"}
             master = None
-            if self.passwords:
-                self._say("    core-mkey: testing %d passwords (iters=%d) @%d" % (len(self.passwords), iters, off))
             for pw in self.passwords:
                 master = core_try_mkey(enc_master, salt, iters, pw)
                 if master is not None:
@@ -1001,9 +993,9 @@ class Carver:
             if sid not in sel:
                 continue
             if sid == "bip39" and not self._mnem:
-                self._say("[!] %-18s requested but 'mnemonic' package missing; skipped (BIP39 only)" % sid)
+                self._say("[!] %s requested but 'mnemonic' package missing; skipped (BIP39 only)" % sid)
                 continue
-            self._say("[*] %-18s %s" % (sid, desc))
+            self.prog.set_label(sid)
             getattr(self, meth)(mm)
         self.prog.finish()
 
