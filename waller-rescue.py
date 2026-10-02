@@ -451,6 +451,9 @@ RE_B64BLOB = re.compile(rb"[A-Za-z0-9+/]{84,20000}={0,2}")
 RE_RUN = re.compile(rb"[\x20-\x7e]{16,}")
 RE_TEXTRUN = re.compile(rb"[\t\n\r\x20-\x7e]{40,}")  # printable + whitespace (spans multi-line phrases)
 RE_HEX64 = re.compile(rb"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
+# OpenSSL/Bitcoin-Core DER EC private key (pywallet --recover signature):
+# SEQUENCE(0x81d3) INTEGER 1 OCTETSTRING(32)=secret [0]=curve params ...
+RE_DER = re.compile(rb"\x30\x81\xd3\x02\x01\x01\x04\x20(.{32})\xa0\x81\x85\x30\x81\x82", re.DOTALL)
 RE_WORDS = re.compile(r"[a-z]+")
 RE_WORDBLOB = re.compile(rb"(?<![A-Za-z \t\r\n])[A-Za-z][A-Za-z \t\r\n]{30,400}[A-Za-z](?![A-Za-z \t\r\n])")
 
@@ -558,7 +561,7 @@ class Carver:
     _VALUABLE = {"wif_privkey", "ext_xprv", "ext_tprv", "electrum_old_wallet",
                  "electrum_plaintext_wallet", "electrum_encrypted",
                  "bitcoin_core_mkey", "bip39_seed", "mnemonic_file",
-                 "electrum_seed", "electrum_old_seed"}
+                 "electrum_seed", "electrum_old_seed", "der_privkey", "sweep_hit"}
 
     def _add(self, dedup_key, record):
         if dedup_key in self.seen:
@@ -606,6 +609,12 @@ class Carver:
         elif k == "electrum_old_seed":
             out.append("Electrum old seed (%d words): %s" % (r.get("words", 0), r["mnemonic"]))
             out.append("hex: " + r.get("seed_hex", ""))
+        elif k == "der_privkey":
+            out.append("WIF (compressed):   " + r.get("wif_compressed", ""))
+            out.append("WIF (uncompressed): " + r.get("wif_uncompressed", ""))
+        elif k == "sweep_hit":
+            out.append("WIF: " + r.get("wif", ""))
+            out.append("address: %s  balance: %d sat  (%d tx)" % (r.get("address", ""), r.get("balance_sat", 0), r.get("tx_count", 0)))
         elif k == "bitcoin_core_mkey":
             out.append("password: " + r.get("password", ""))
             out.append("master key: " + r.get("master_key_hex", ""))
@@ -639,7 +648,7 @@ class Carver:
             for m in RE_WIF.finditer(view):
                 p = parse_wif(m.group())
                 if p:
-                    self._add(("wif", p["wif"]), {"kind": "wif_privkey", "offset": base + m.start(), **p, "status": "VALID"})
+                    self._add(("priv", p["privkey_hex"]), {"kind": "wif_privkey", "offset": base + m.start(), **p, "status": "VALID"})
 
     def scan_ext(self, mm):
         for base, view in self._iter_chunks(mm):
@@ -837,6 +846,63 @@ class Carver:
         for mm2 in re.finditer(rb"\x30(.{48})", win, re.DOTALL):
             yield mm2.group(1)
 
+    # -- DER-encoded EC private keys in raw bytes (pywallet --recover) -----
+    def scan_der(self, mm):
+        for base, view in self._iter_chunks(mm):
+            for m in RE_DER.finditer(view):
+                secret = m.group(1)
+                v = int.from_bytes(secret, "big")
+                if not (0 < v < _N):
+                    continue
+                # cross-check the uncompressed pubkey embedded later in the DER blob
+                tail = view[m.start():m.start() + 220]
+                pm = tail.find(b"\x03\x42\x00\x04")
+                if pm != -1 and pm + 4 + 64 <= len(tail):
+                    if tail[pm + 4:pm + 4 + 64] != pub_from_priv(secret, False)[1:]:
+                        continue  # embedded pubkey mismatch -> not a real key record
+                self._add(("der", secret.hex()), {
+                    "kind": "der_privkey", "offset": base + m.start(),
+                    "privkey_hex": secret.hex(),
+                    "wif_compressed": privkey_to_wif(secret, True),
+                    "wif_uncompressed": privkey_to_wif(secret, False),
+                    "status": "VALID"})
+
+    # -- 32-byte sliding-window brute (ameijer simple recovery) ------------
+    def scan_privkey_sweep(self, mm):
+        if not self.cfg.get("sweep_check"):
+            self._say("[!] privkey-sweep needs --check-balance (every 32-byte window is a valid key; "
+                      "only on-chain balance can filter them); skipped")
+            return
+        cap = self.cfg.get("sweep_max_bytes", 262144)
+        n = len(mm)
+        if n > cap:
+            self._say("[!] privkey-sweep: input %s exceeds cap %s (raise --sweep-max-mb, or carve a "
+                      "smaller region such as a single wallet.dat); skipped" % (_fmt_bytes(n), _fmt_bytes(cap)))
+            return
+        api = self.cfg.get("api_url")
+        step = self.cfg.get("sweep_step", 1)
+        checked = 0
+        for off in range(0, n - 31, step):
+            secret = mm[off:off + 32]
+            v = int.from_bytes(secret, "big")
+            if not (0 < v < _N):
+                continue
+            checked += 1
+            for comp in (True, False):
+                addr = addr_p2pkh(pub_from_priv(secret, comp))
+                try:
+                    bal, txs = esplora_balance(api, addr)
+                except Exception:
+                    continue
+                if txs > 0 or bal > 0:
+                    self._add(("sweep", off, comp), {
+                        "kind": "sweep_hit", "offset": off, "privkey_hex": secret.hex(),
+                        "wif": privkey_to_wif(secret, comp), "address": addr,
+                        "balance_sat": bal, "tx_count": txs,
+                        "status": "VALID (funded)" if bal > 0 else "VALID (used, empty)"})
+                time.sleep(0.2)
+        self._say("[*] privkey-sweep: checked %d candidate key(s)" % checked)
+
     # -- standalone seed file (whole text region IS the phrase) -----------
     def scan_mnemonic_file(self, mm):
         have_bip39 = self._mnem is not None
@@ -927,7 +993,8 @@ class Carver:
         sel = self.cfg["selected"]
         size = len(mm)
         passes = {"wif": 1, "ext": 1, "hex": 1, "electrum-v4": 1, "electrum-2x-plain": 1,
-                  "electrum-bie1": 1, "core-mkey": 2, "mnemonic-file": 1, "bip39": 1}
+                  "electrum-bie1": 1, "core-mkey": 2, "der-key": 1, "mnemonic-file": 1,
+                  "bip39": 1, "privkey-sweep": 0}
         total = sum(passes[s] * size for s in sel if not (s == "bip39" and not self._mnem))
         self.prog = Progress(total, enabled=not self.cfg.get("no_progress"))
         for sid, meth, desc in SCHEMES:
@@ -950,9 +1017,11 @@ SCHEMES = [
     ("electrum-2x-plain", "scan_electrum_plaintext", "Electrum 2.x plaintext wallet"),
     ("electrum-bie1", "scan_electrum_encrypted", "Electrum 2.x encrypted wallet (BIE1/ECIES)"),
     ("core-mkey", "scan_core", "Bitcoin Core wallet.dat (mkey/ckey)"),
+    ("der-key", "scan_der", "DER-encoded EC private keys in raw bytes (pywallet --recover)"),
     ("mnemonic-file", "scan_mnemonic_file", "standalone file whose whole content is ONLY a seed (BIP39 or any Electrum type)"),
     ("bip39", "scan_bip39", "BIP39 seed phrase embedded anywhere (sliding window)"),
     ("hex", "scan_hex", "raw 64-hex privkey candidates (UNVERIFIED, off in 'all')"),
+    ("privkey-sweep", "scan_privkey_sweep", "32-byte sliding-window brute, balance-filtered (ameijer; needs --check-balance, small input)"),
 ]
 _SCHEME_IDS = [s[0] for s in SCHEMES]
 
@@ -967,7 +1036,7 @@ def resolve_schemes(tokens):
             if not tk:
                 continue
             if tk == "all":
-                if sid != "hex":
+                if sid not in ("hex", "privkey-sweep"):
                     sel.add(sid)
             elif tk == "*":
                 sel.add(sid)
@@ -1062,6 +1131,11 @@ def b58encode(b):
 
 def b58check_encode(payload):
     return b58encode(payload + dsha256(payload)[:4]).decode()
+
+
+def privkey_to_wif(priv32, compressed, testnet=False):
+    payload = bytes([0xEF if testnet else 0x80]) + priv32 + (b"\x01" if compressed else b"")
+    return b58check_encode(payload)
 
 
 def addr_p2pkh(pubkey, ver=0x00):
@@ -1340,7 +1414,7 @@ def derive_addresses_for_finding(r, gap):
     def from_priv_hex(h):
         return addresses_from_priv(bytes.fromhex(h))
 
-    if k == "wif_privkey":
+    if k in ("wif_privkey", "der_privkey", "sweep_hit"):
         out += from_priv_hex(r["privkey_hex"])
     elif k == "bitcoin_core_mkey":
         for rk in r.get("recovered_keys", []):
@@ -1509,6 +1583,18 @@ def selftest():
     check("electrum seed type", electrum_seed_type(esd) == "segwit")
     swa = dict(electrum_new_addresses(esd, gap=1, stype="segwit"))
     check("electrum segwit m/0'/0/0", swa.get("sw/0/0") == "bc1q4794m2uuw9jmjszmplfj4wvvr5j272fpnx2cse")
+    # WIF encoder round-trips through the decoder
+    check("WIF encode/decode", parse_wif(privkey_to_wif(p1, True).encode())["privkey_hex"] == p1.hex())
+    # DER EC key scan extracts the embedded secret and validates the embedded pubkey
+    dsecret = bytes.fromhex("0000000000000000000000000000000000000000000000000000000000000003")
+    dpub = pub_from_priv(dsecret, False)[1:]
+    der = (b"\x30\x81\xd3\x02\x01\x01\x04\x20" + dsecret + b"\xa0\x81\x85\x30\x81\x82"
+           + b"\x00" * 100 + b"\x03\x42\x00\x04" + dpub + b"\x00" * 8)
+    cfg = {"passwords": [], "selected": {"der-key"}, "min_iter": 1, "max_iter": 5,
+           "bip39": False, "no_progress": True}
+    cv = Carver(cfg)
+    cv.scan_der(b"\x00" * 64 + der + b"\x00" * 64)
+    check("DER key scan", any(r["kind"] == "der_privkey" and r["privkey_hex"] == dsecret.hex() for r in cv.findings))
     sys.stderr.write("selftest: %s\n" % ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 
@@ -1534,6 +1620,9 @@ def main():
     ap.add_argument("--api-url", default="https://blockstream.info/api",
                     help="Esplora-compatible API base (default blockstream.info; use your own for privacy)")
     ap.add_argument("--gap", type=int, default=20, help="address gap limit for seed/xprv derivation")
+    ap.add_argument("--sweep-max-mb", type=float, default=0.25,
+                    help="privkey-sweep: max input size in MiB to brute (default 0.25; sweep is API-bound)")
+    ap.add_argument("--sweep-step", type=int, default=1, help="privkey-sweep: byte step between candidates")
     ap.add_argument("--no-progress", action="store_true")
     ap.add_argument("--install-deps", action="store_true")
     ap.add_argument("--list-schemes", action="store_true")
@@ -1589,6 +1678,10 @@ def main():
         "bip39": ("bip39" in selected) or ("mnemonic-file" in selected),
         "seedfile_strict": not a.seedfile_nochecksum,
         "no_progress": a.no_progress,
+        "sweep_check": a.check_balance,
+        "api_url": a.api_url,
+        "sweep_max_bytes": int(a.sweep_max_mb * (1 << 20)),
+        "sweep_step": max(1, a.sweep_step),
     }
 
     os.makedirs(a.out, exist_ok=True)
