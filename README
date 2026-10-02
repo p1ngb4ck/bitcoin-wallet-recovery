@@ -1,0 +1,232 @@
+# wallet_carver
+
+Forensic recovery tool for Bitcoin/Electrum key material from a raw `dd`/`ddrescue`
+image — **even when the filesystem is destroyed/overwritten**.
+
+> **Focus:** this tool works exclusively on **raw `dd`/`ddrescue` images** and reads the
+> **byte stream directly** — no filesystem, no mounting, no wallet software. That means it
+> recovers key material even when the filesystem is **destroyed, overwritten, or only
+> partially rescued with `ddrescue`**. It is meant for recovering **your own** wallets, runs
+> **offline**, and reports **only structurally validated hits** (no false positives).
+
+---
+
+## What it finds
+
+| Scheme | Content |
+|---|---|
+| `wif` | WIF private keys (base58check) |
+| `ext` | Extended keys `xprv`/`xpub`/`tprv`/`tpub` |
+| `electrum-v4` | Pre-2.0 Electrum wallet (`seed_version 4`, 2011–2014) — incl. password testing |
+| `electrum-2x-plain` | Electrum 2.x wallet in plaintext (JSON) |
+| `electrum-bie1` | Electrum 2.x encrypted wallet (`BIE1`/ECIES) — incl. password testing |
+| `core-mkey` | Bitcoin Core `wallet.dat` (`mkey`/`ckey`) — incl. password testing |
+| `mnemonic-file` | Standalone file whose **entire** content is ONLY a seed (BIP39 or any Electrum type) |
+| `bip39` | BIP39 seed embedded anywhere in larger text (sliding window) |
+| `hex` | raw 64-hex private-key candidates (**unverified**, not in `all`) |
+
+Electrum seed types detected: **old** (1.x, hex + optional old mnemonic) and **new** (2.0+):
+`standard` (0x01), `segwit` (0x100), `2fa` (0x101), `2fa_segwit` (0x102).
+
+---
+
+## Installation (Ubuntu)
+
+Recommended: a dedicated **virtualenv**, so nothing touches the system Python.
+
+```bash
+# 1) system packages
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip
+
+# 2) create and activate a virtualenv
+python3 -m venv ~/wallet-carver-venv
+source ~/wallet-carver-venv/bin/activate
+
+# 3) install dependencies
+pip install --upgrade pip
+pip install cryptography mnemonic
+```
+
+- **`cryptography`** — required (AES-CBC for all decryptions).
+- **`mnemonic`** — only for BIP39 (checksum validation). Without it, every other scheme still
+  runs; only BIP39 is skipped. Electrum seeds do **not** need it.
+- **optional `electrum`** (`pip install electrum`) — automatically enables detection of
+  **standalone old Electrum mnemonics** (needs the 1626-word list). Alternatively pass
+  `--electrum-old-wordlist <file>`.
+
+Then place the script in your project directory and run it (venv active):
+
+```bash
+python wallet_carver.py --selftest     # verifies all crypto primitives, must print "PASS"
+```
+
+> If you use a specific interpreter (e.g. `python3.14`), create the venv with it:
+> `python3.14 -m venv ~/wallet-carver-venv`.
+
+**Alternative without a venv:** `python3 wallet_carver.py --install-deps -i …` installs the
+packages itself (on Ubuntu's "externally-managed-environment" it automatically falls back to
+`--break-system-packages`). A venv is cleaner, though.
+
+---
+
+## Creating the image (dd / ddrescue)
+
+The tool reads an **image file**, not a live drive. Create it from the source device first
+(and **never** write to the source drive). `ddrescue` is more robust with bad sectors and can
+resume thanks to its mapfile:
+
+```bash
+# preferred: ddrescue (skips read errors, mapfile allows resuming)
+sudo apt install -y gddrescue
+sudo ddrescue -d -r3 /dev/sdX disk.img disk.mapfile
+
+# simple alternative with dd
+sudo dd if=/dev/sdX of=disk.img bs=4M conv=noerror,sync status=progress
+```
+
+Replace `/dev/sdX` with the **source drive**. Afterwards the tool works exclusively on
+`disk.img` — the original stays untouched. Incomplete `ddrescue` images (with gaps from
+unreadable sectors) are usable too: the raw byte stream is what gets scanned.
+
+---
+
+## Quick start
+
+```bash
+# just view the scheme list
+python wallet_carver.py --list-schemes
+
+# search the whole image, test passwords, check balances
+python wallet_carver.py \
+  -i /path/to/disk.img \
+  -p password_list.txt \
+  -s '*' \
+  --check-balance \
+  -o carver.out
+```
+
+- `password_list.txt`: one password per line (UTF-8). Encrypted candidates are tested against
+  **every** password.
+- Output: `carver.out/findings.jsonl` (mode `0600`, written **live** per hit). Every valid hit
+  is also shown **immediately** on screen.
+
+### "Find everything" — one command
+
+```bash
+python wallet_carver.py -i disk.img -p password_list.txt -s '*' --check-balance -o carver.out
+```
+
+`-s '*'` enables every detector (including the unverified `hex`). `-s all` is identical but
+omits `hex` (recommended if you only want validated hits).
+
+---
+
+## Scheme selection (`-s` / `--schemes`)
+
+Comma list of: exact id · wildcard · group · `all` · `*`
+
+```bash
+-s all                     # all validated schemes (without hex)
+-s '*'                     # literally everything (incl. hex)
+-s 'electrum-*'            # all Electrum schemes
+-s electrum-v4,core-mkey   # just these two
+-s mnemonic-file           # standalone seed files only
+```
+
+---
+
+## Key options
+
+| Option | Effect |
+|---|---|
+| `-i FILE` | raw image (`dd`/`ddrescue`) — **required** |
+| `-p FILE` | password list (one per line) |
+| `-o DIR` | output directory (default `./carver_out`) |
+| `-s LIST` | scheme selection (default `all`) |
+| `--check-balance` | derive addresses **and** query on-chain balance |
+| `--addresses-only` | derive addresses, **no** API query (OPSEC-safe) |
+| `--api-url URL` | Esplora-compatible API (default `https://blockstream.info/api`) |
+| `--gap N` | gap limit for seed/xprv derivation (default 20) |
+| `--hex` | additionally run the `hex` scheme (unverified) |
+| `--seedfile-nochecksum` | `mnemonic-file`: also report exact 12/24-word regions with a **failing** checksum |
+| `--electrum-old-wordlist FILE` | 1626-word list for old Electrum mnemonics |
+| `--min-iter N` / `--max-iter N` | sanity window for Core `mkey` iterations |
+| `--no-progress` | disable the progress bar |
+| `--install-deps` | install packages via pip |
+| `--list-schemes` | show available schemes |
+| `--selftest` | verify crypto primitives against test vectors |
+
+---
+
+## Checking balances & privacy
+
+```bash
+# OPSEC-safe: derive addresses only, check them yourself on your own node
+python wallet_carver.py -i disk.img -s all --addresses-only -o out
+#   -> out/addresses.txt
+
+# with a query (discloses your addresses to the API server!)
+python wallet_carver.py -i disk.img -s all --check-balance -o out
+#   -> out/balances.txt  (hits shown live on screen, ">>>" = has a balance)
+```
+
+> **Privacy note:** `--check-balance` discloses the queried addresses to the API operator. For
+> maximum privacy use `--addresses-only` + your own node, or
+> `--api-url https://<your-esplora-instance>/api` (e.g. mempool.space-compatible).
+
+Addresses derived per hit type:
+- Private keys → P2PKH (compressed/uncompressed), P2WPKH, P2SH-P2WPKH
+- Old Electrum seed → its own derivation (uncompressed P2PKH)
+- Electrum new → `standard` (m/0,m/1 P2PKH) or `segwit` (m/0' P2WPKH); 2FA reported only
+- xprv/xpub/BIP39 → BIP44/49/84 + Electrum paths (common paths, gap limit)
+
+---
+
+## Output files (`-o`)
+
+| File | Content |
+|---|---|
+| `findings.jsonl` | one JSON object per hit, written live, mode `0600` |
+| `addresses.txt` | derived addresses (with `--check-balance`/`--addresses-only`) |
+| `balances.txt` | used/funded addresses with balance (with `--check-balance`) |
+
+`status` values: `VALID` / `DECRYPTED` / `PLAINTEXT` = confirmed hit ·
+`ENCRYPTED` = found but no password matched · `UNVERIFIED` = hex candidate with no guarantee.
+
+---
+
+## Why no false positives
+
+Every reported hit is **structurally validated**, not just signature-matched:
+- WIF/xprv: base58check (deterministic)
+- Core `mkey`: the correct password yields a full PKCS7 pad block `0x10`×16 (random chance ≈ 256⁻¹⁶)
+- Electrum `BIE1`: the HMAC-SHA256 over the ECIES blob **is** the password check
+- Old Electrum seed: decrypts to exactly 32 hex chars (PKCS7-checked)
+- BIP39: valid checksum; `mnemonic-file` additionally requires "the region contains ONLY the seed"
+- Electrum new: canonical `HMAC("Seed version")` version prefix
+
+Exception: `hex` (raw 64-hex keys) cannot be structurally validated → off by default, marked
+`UNVERIFIED`.
+
+---
+
+## Troubleshooting
+
+- **`externally-managed-environment` on pip install** → use a venv (above), or `--install-deps`
+  (automatically falls back to `--break-system-packages`).
+- **`SyntaxError` on startup** → run the script with **python** (`python wallet_carver.py …`),
+  not with `bash`.
+- **Image is a block device instead of a file** → copy it to a file with `dd` first (the tool
+  uses `mmap`; for devices it falls back to a full read and needs RAM ≥ image size).
+- **API 403 / rate limiting** → your own Esplora node via `--api-url`, or `--addresses-only`.
+- **BIP39 is skipped** → `pip install mnemonic` (Electrum seeds don't need it).
+- Large images: the progress bar shows %, MB/s, ETA; multiple passes are chunked (64 MiB with
+  overlap), and hits straddling chunk boundaries are not lost.
+
+---
+
+## Note
+
+Intended only for recovering wallets you have a right to (your own, or with permission). The
+balance query is optional and off by default.
