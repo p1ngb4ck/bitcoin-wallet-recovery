@@ -217,8 +217,10 @@ Exception: `hex` (raw 64-hex keys) cannot be structurally validated → off by d
   (automatically falls back to `--break-system-packages`).
 - **`SyntaxError` on startup** → run the script with **python** (`python wallet_carver.py …`),
   not with `bash`.
-- **Image is a block device instead of a file** → copy it to a file with `dd` first (the tool
-  uses `mmap`; for devices it falls back to a full read and needs RAM ≥ image size).
+- **Scanning a raw block device** (`-i /dev/sdX`) works directly — run with `sudo`. The tool
+  sizes the device via `lseek` and mmaps it demand-paged (no full RAM load). An image created
+  with `dd`/`ddrescue` is still recommended for a failing drive: a read-only copy avoids extra
+  wear and lets you re-run without the disk attached.
 - **API 403 / rate limiting** → your own Esplora node via `--api-url`, or `--addresses-only`.
 - **BIP39 is skipped** → `pip install mnemonic` (Electrum seeds don't need it).
 - Large images: the progress bar shows %, MB/s, ETA; multiple passes are chunked (64 MiB with
