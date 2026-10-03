@@ -530,6 +530,9 @@ class Progress:
 class Carver:
     CHUNK = 64 << 20
     OVERLAP = 1 << 20
+    PASSES = {"wif": 1, "ext": 1, "hex": 1, "electrum-v4": 1, "electrum-2x-plain": 1,
+              "electrum-bie1": 1, "core-mkey": 2, "der-key": 1, "mnemonic-file": 1,
+              "bip39": 1, "privkey-sweep": 0}
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -538,6 +541,7 @@ class Carver:
         self.seen = set()
         self.prog = None
         self.jsonl_fh = None
+        self.current_path = None  # set per file in filesystem-scan mode
         self._mnem = Mnemonic("english") if (cfg["bip39"] and _HAVE_MNEMONIC) else None
         self._wl = set(self._mnem.wordlist) if self._mnem else None
 
@@ -565,6 +569,9 @@ class Carver:
                  "electrum_seed", "electrum_old_seed", "der_privkey", "sweep_hit"}
 
     def _add(self, dedup_key, record):
+        if self.current_path is not None:
+            record.setdefault("path", self.current_path)
+            dedup_key = (self.current_path,) + tuple(dedup_key)  # offsets are per-file
         if dedup_key in self.seen:
             return
         self.seen.add(dedup_key)
@@ -578,7 +585,8 @@ class Carver:
             self._log_hit(record)
 
     def _log_hit(self, r):
-        self._say("  [HIT] %-16s off=%s %s" % (r["kind"], r.get("offset"), r.get("status", "")))
+        loc = ("%s off=%s" % (r["path"], r.get("offset"))) if r.get("path") else ("off=%s" % r.get("offset"))
+        self._say("  [HIT] %-16s %s %s" % (r["kind"], loc, r.get("status", "")))
 
     @classmethod
     def _is_valuable(cls, r):
@@ -589,6 +597,8 @@ class Carver:
         self._say("")
         self._say("  ********************* WALLET RECOVERED *********************")
         self._say("  %-22s @off=%s  [%s]" % (r["kind"], r.get("offset"), r.get("status", "")))
+        if r.get("path"):
+            self._say("  file: " + r["path"])
         for line in self._secret_lines(r):
             self._say("    " + line)
         self._say("  ***********************************************************")
@@ -977,7 +987,31 @@ class Carver:
                     i += 1
 
     # -- driver ------------------------------------------------------------
+    def _passes_sum(self):
+        sel = self.cfg["selected"]
+        return sum(self.PASSES[s] for s in sel if not (s == "bip39" and not self._mnem))
+
+    def _warn_missing_mnem(self):
+        if "bip39" in self.cfg["selected"] and not self._mnem:
+            self._say("[!] bip39 requested but 'mnemonic' package missing; skipped (BIP39 only)")
+
+    def _scan_buffer(self, mm):
+        sel = self.cfg["selected"]
+        for sid, meth, desc in SCHEMES:
+            if sid not in sel:
+                continue
+            if sid == "bip39" and not self._mnem:
+                continue
+            self.prog.set_label(sid)
+            getattr(self, meth)(mm)
+
     def run(self, path):
+        if os.path.isdir(path):
+            self._run_tree([path])
+        else:
+            self._run_single(path)
+
+    def _run_single(self, path):
         f = open(path, "rb")
         # works for regular files AND raw block devices (/dev/sdX): lseek(SEEK_END)
         # returns the true size even when stat() reports 0 for a device node
@@ -991,21 +1025,114 @@ class Carver:
         except (ValueError, OSError):
             sys.stderr.write("mmap failed; falling back to full read (needs RAM >= size)\n")
             mm = f.read()
-        sel = self.cfg["selected"]
-        size = len(mm)
-        passes = {"wif": 1, "ext": 1, "hex": 1, "electrum-v4": 1, "electrum-2x-plain": 1,
-                  "electrum-bie1": 1, "core-mkey": 2, "der-key": 1, "mnemonic-file": 1,
-                  "bip39": 1, "privkey-sweep": 0}
-        total = sum(passes[s] * size for s in sel if not (s == "bip39" and not self._mnem))
-        self.prog = Progress(total, enabled=not self.cfg.get("no_progress"))
-        for sid, meth, desc in SCHEMES:
-            if sid not in sel:
+        self.prog = Progress(len(mm) * self._passes_sum(), enabled=not self.cfg.get("no_progress"))
+        self.current_path = None
+        self._warn_missing_mnem()
+        self._scan_buffer(mm)
+        self.prog.finish()
+
+    # ---- mounted-filesystem / directory scanning -------------------------
+    _PSEUDO_FS = {"proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "cgroup", "cgroup2",
+                  "pstore", "securityfs", "debugfs", "tracefs", "mqueue", "hugetlbfs",
+                  "bpf", "configfs", "fusectl", "autofs", "binfmt_misc", "ramfs",
+                  "squashfs", "overlay", "nsfs", "efivarfs", "rpc_pipefs"}
+
+    def _discover_mounts(self):
+        mounts = []
+        try:
+            lines = open("/proc/mounts", encoding="utf-8").read().splitlines()
+        except OSError:
+            return mounts
+        for ln in lines:
+            parts = ln.split()
+            if len(parts) < 3:
                 continue
-            if sid == "bip39" and not self._mnem:
-                self._say("[!] %s requested but 'mnemonic' package missing; skipped (BIP39 only)" % sid)
+            mnt, fstype = parts[1], parts[2]
+            if fstype in self._PSEUDO_FS:
                 continue
-            self.prog.set_label(sid)
-            getattr(self, meth)(mm)
+            mnt = mnt.replace("\\040", " ").replace("\\011", "\t")
+            if os.path.isdir(mnt) and mnt not in mounts:
+                mounts.append(mnt)
+        return mounts
+
+    def _collect_files(self, roots):
+        import stat as _stat
+        maxb = self.cfg.get("max_file_bytes") or 0
+        cross = self.cfg.get("cross_device")
+        skip = os.path.abspath(self.cfg.get("out_dir") or "")
+        files, seen = [], set()
+        for root in roots:
+            root = os.path.abspath(root)
+            try:
+                root_dev = os.stat(root).st_dev
+            except OSError:
+                continue
+            for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=lambda e: None):
+                # stay on the same filesystem unless --cross-device (prunes pseudo-fs + nested mounts)
+                if not cross:
+                    kept = []
+                    for d in dirnames:
+                        try:
+                            if os.lstat(os.path.join(dirpath, d)).st_dev == root_dev:
+                                kept.append(d)
+                        except OSError:
+                            pass
+                    dirnames[:] = kept
+                if skip and (dirpath == skip or dirpath.startswith(skip + os.sep)):
+                    dirnames[:] = []
+                    continue
+                for name in filenames:
+                    fp = os.path.join(dirpath, name)
+                    try:
+                        st = os.lstat(fp)
+                    except OSError:
+                        continue
+                    if not _stat.S_ISREG(st.st_mode):  # skip symlinks, devices, sockets, pipes
+                        continue
+                    if st.st_size == 0:
+                        continue
+                    if maxb and st.st_size > maxb:
+                        continue
+                    key = (st.st_dev, st.st_ino)
+                    if key in seen:  # avoid hardlink double-scan
+                        continue
+                    seen.add(key)
+                    files.append((fp, st.st_size))
+        return files
+
+    def run_mounts(self):
+        mounts = self._discover_mounts()
+        if not mounts:
+            sys.stderr.write("no scannable mounted filesystems found in /proc/mounts\n")
+            return
+        sys.stderr.write("[*] mounted filesystems: %s\n" % ", ".join(mounts))
+        self._run_tree(mounts)
+
+    def _run_tree(self, roots):
+        self._warn_missing_mnem()
+        sys.stderr.write("[*] enumerating files ...\n")
+        files = self._collect_files(roots)
+        total_bytes = sum(sz for _, sz in files)
+        sys.stderr.write("[*] filesystem scan: %d files, %s\n" % (len(files), _fmt_bytes(total_bytes)))
+        self.prog = Progress(max(1, total_bytes) * max(1, self._passes_sum()),
+                             enabled=not self.cfg.get("no_progress"))
+        for fp, sz in files:
+            self.current_path = fp
+            try:
+                f = open(fp, "rb")
+            except OSError:
+                continue
+            try:
+                try:
+                    mm = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
+                except (ValueError, OSError):
+                    mm = f.read()
+                self._scan_buffer(mm)
+                if hasattr(mm, "close"):
+                    mm.close()
+            finally:
+                f.close()
+        self.current_path = None
         self.prog.finish()
 
 
@@ -1640,6 +1767,12 @@ def main():
     ap.add_argument("--sweep-max-mb", type=float, default=0.25,
                     help="privkey-sweep: max input size in MiB to brute (default 0.25; sweep is API-bound)")
     ap.add_argument("--sweep-step", type=int, default=1, help="privkey-sweep: byte step between candidates")
+    ap.add_argument("--scan-mounts", action="store_true",
+                    help="scan every mounted real filesystem (from /proc/mounts), file by file")
+    ap.add_argument("--max-file-mb", type=float, default=0,
+                    help="in filesystem/mount mode, skip files larger than this many MB (0 = no limit)")
+    ap.add_argument("--cross-device", action="store_true",
+                    help="in filesystem mode, descend across mount points (default: stay on one filesystem)")
     ap.add_argument("--no-progress", action="store_true")
     ap.add_argument("--install-deps", action="store_true")
     ap.add_argument("--list-schemes", action="store_true")
@@ -1656,12 +1789,13 @@ def main():
         sys.stderr.write("\nexamples: --schemes all | --schemes 'electrum-*' | --schemes electrum-v4,core-mkey | --schemes '*'\n")
         sys.exit(0)
 
-    if not a.image:
-        ap.error("-i/--image required")
-    if not os.path.exists(a.image):
-        sys.exit("input not found: %s" % a.image)
-    if not os.access(a.image, os.R_OK):
-        sys.exit("cannot read %s (raw block devices usually need root: run with sudo)" % a.image)
+    if not a.scan_mounts:
+        if not a.image:
+            ap.error("-i/--image required (or use --scan-mounts)")
+        if not os.path.exists(a.image):
+            sys.exit("input not found: %s" % a.image)
+        if not os.access(a.image, os.R_OK):
+            sys.exit("cannot read %s (raw block devices usually need root: run with sudo)" % a.image)
 
     ensure_deps(install=a.install_deps)
 
@@ -1703,6 +1837,9 @@ def main():
         "api_url": a.api_url,
         "sweep_max_bytes": int(a.sweep_max_mb * (1 << 20)),
         "sweep_step": max(1, a.sweep_step),
+        "max_file_bytes": int(a.max_file_mb * (1 << 20)),
+        "cross_device": a.cross_device,
+        "out_dir": a.out,
     }
 
     os.makedirs(a.out, exist_ok=True)
@@ -1711,7 +1848,12 @@ def main():
     except OSError:
         pass
 
-    sys.stderr.write("[*] input: %s (%s)\n" % (a.image, _fmt_bytes(input_byte_size(a.image))))
+    if a.scan_mounts:
+        sys.stderr.write("[*] input: all mounted filesystems\n")
+    elif os.path.isdir(a.image):
+        sys.stderr.write("[*] input: %s (directory / mounted filesystem)\n" % a.image)
+    else:
+        sys.stderr.write("[*] input: %s (%s)\n" % (a.image, _fmt_bytes(input_byte_size(a.image))))
     sys.stderr.write("[*] passwords loaded: %d\n" % len(passwords))
     sys.stderr.write("[*] schemes: %s\n" % ",".join(s for s in _SCHEME_IDS if s in selected))
 
@@ -1720,7 +1862,10 @@ def main():
     carver = Carver(cfg)
     carver.jsonl_fh = os.fdopen(fd, "w")  # live, flushed per finding
     try:
-        carver.run(a.image)
+        if a.scan_mounts:
+            carver.run_mounts()
+        else:
+            carver.run(a.image)
     finally:
         carver.jsonl_fh.flush()
 
