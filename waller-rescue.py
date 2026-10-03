@@ -979,10 +979,17 @@ class Carver:
     # -- driver ------------------------------------------------------------
     def run(self, path):
         f = open(path, "rb")
+        # works for regular files AND raw block devices (/dev/sdX): lseek(SEEK_END)
+        # returns the true size even when stat() reports 0 for a device node
         try:
-            mm = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
+            dev_size = os.lseek(f.fileno(), 0, os.SEEK_END)
+            os.lseek(f.fileno(), 0, os.SEEK_SET)
+        except OSError:
+            dev_size = 0
+        try:
+            mm = mmap.mmap(f.fileno(), dev_size, prot=mmap.PROT_READ)  # demand-paged
         except (ValueError, OSError):
-            sys.stderr.write("mmap failed; falling back to full read (needs RAM >= image size)\n")
+            sys.stderr.write("mmap failed; falling back to full read (needs RAM >= size)\n")
             mm = f.read()
         sel = self.cfg["selected"]
         size = len(mm)
@@ -1594,6 +1601,22 @@ def selftest():
 
 
 # ---------------------------------------------------------------- main
+def input_byte_size(path):
+    # true byte size for both regular files and raw block devices (stat() reports
+    # 0 for a device node, so seek to the end instead)
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            return os.lseek(fd, 0, os.SEEK_END)
+        finally:
+            os.close(fd)
+    except OSError:
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="wallet carver engine")
     ap.add_argument("-i", "--image")
@@ -1635,6 +1658,10 @@ def main():
 
     if not a.image:
         ap.error("-i/--image required")
+    if not os.path.exists(a.image):
+        sys.exit("input not found: %s" % a.image)
+    if not os.access(a.image, os.R_OK):
+        sys.exit("cannot read %s (raw block devices usually need root: run with sudo)" % a.image)
 
     ensure_deps(install=a.install_deps)
 
@@ -1684,7 +1711,7 @@ def main():
     except OSError:
         pass
 
-    sys.stderr.write("[*] image: %s (%d bytes)\n" % (a.image, os.path.getsize(a.image)))
+    sys.stderr.write("[*] input: %s (%s)\n" % (a.image, _fmt_bytes(input_byte_size(a.image))))
     sys.stderr.write("[*] passwords loaded: %d\n" % len(passwords))
     sys.stderr.write("[*] schemes: %s\n" % ",".join(s for s in _SCHEME_IDS if s in selected))
 
