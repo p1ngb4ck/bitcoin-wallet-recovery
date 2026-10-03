@@ -1,13 +1,8 @@
 # wallet-rescue
 
 > **Recover lost Bitcoin, Electrum and Bitcoin Core wallets, private keys and seed phrases
-> from a raw `dd`/`ddrescue` disk image — even when the filesystem is destroyed, formatted or
+> from block-devices, mounted filesystems or a raw `dd`/`ddrescue` disk image — even when the filesystem is destroyed, formatted or
 > overwritten.** Offline, forensic, zero false positives.
-
-![Python](https://img.shields.io/badge/python-3.8%2B-blue)
-![Platform](https://img.shields.io/badge/platform-Linux-informational)
-![Mode](https://img.shields.io/badge/mode-offline-success)
-![False positives](https://img.shields.io/badge/false%20positives-none-success)
 
 `wallet-rescue` scans the **raw byte stream** of a disk image, block device or mounted
 filesystem and carves out Bitcoin key material — WIF private keys, extended keys, Bitcoin Core
