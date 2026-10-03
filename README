@@ -1,8 +1,10 @@
 # wallet-rescue
 
 > **Recover lost Bitcoin, Electrum and Bitcoin Core wallets, private keys and seed phrases
-> from block-devices, mounted filesystems or a raw `dd`/`ddrescue` disk image — even when the filesystem is destroyed, formatted or
+> from a raw `dd`/`ddrescue` disk image — even when the filesystem is destroyed, formatted or
 > overwritten.** Offline, forensic, zero false positives.
+
+**Python 3.8+** · **Linux** · **Offline** · **Zero false positives**
 
 `wallet-rescue` scans the **raw byte stream** of a disk image, block device or mounted
 filesystem and carves out Bitcoin key material — WIF private keys, extended keys, Bitcoin Core
@@ -13,6 +15,7 @@ wallets are **tested against your own password list**, and recovered addresses c
 
 ---
 
+<a id="table-of-contents"></a>
 ## Table of contents
 
 - [Features](#features)
@@ -32,6 +35,7 @@ wallets are **tested against your own password list**, and recovered addresses c
 
 ---
 
+<a id="features"></a>
 ## Features
 
 - 🧲 **Works on destroyed filesystems** — reads the raw byte stream, no mount, no wallet app.
@@ -50,6 +54,7 @@ wallets are **tested against your own password list**, and recovered addresses c
 
 ---
 
+<a id="supported-wallets-and-seed-types"></a>
 ## Supported wallets and seed types
 
 | Scheme | What it recovers |
@@ -77,6 +82,7 @@ wallets are **tested against your own password list**, and recovered addresses c
 
 ---
 
+<a id="installation"></a>
 ## Installation
 
 Ubuntu/Debian. A dedicated **virtualenv** is recommended so nothing touches the system Python.
@@ -130,6 +136,7 @@ python wallet_rescue.py --selftest     # checks all crypto primitives against kn
 
 ---
 
+<a id="how-to-use"></a>
 ## How to use
 
 A typical end-to-end recovery:
@@ -161,6 +168,7 @@ python wallet_rescue.py -i disk.img -p password_list.txt -s '*' --check-balance 
 
 ---
 
+<a id="input-modes"></a>
 ## Input modes
 
 | Mode | Command | Notes |
@@ -183,6 +191,7 @@ sudo python wallet_rescue.py --scan-mounts -s all --max-file-mb 2048 -o rescue.o
 
 ---
 
+<a id="creating-a-disk-image"></a>
 ## Creating a disk image
 
 Image the source device **first** and never write to the original drive. `ddrescue` is more
@@ -202,6 +211,7 @@ disk attached.
 
 ---
 
+<a id="scheme-selection"></a>
 ## Scheme selection
 
 `-s` / `--schemes` takes a comma list of: exact id · wildcard · group · `all` · `*`
@@ -223,6 +233,7 @@ python wallet_rescue.py --list-schemes
 
 ---
 
+<a id="options"></a>
 ## Options
 
 | Option | Effect |
@@ -251,6 +262,7 @@ python wallet_rescue.py --list-schemes
 
 ---
 
+<a id="checking-balances-and-privacy"></a>
 ## Checking balances and privacy
 
 ```bash
@@ -273,6 +285,7 @@ P2SH-P2WPKH; old Electrum → its own derivation; Electrum 2.x → standard/segw
 
 ---
 
+<a id="output-files"></a>
 ## Output files
 
 Everything lands in the `-o` directory (created `0700`):
@@ -288,6 +301,7 @@ Everything lands in the `-o` directory (created `0700`):
 
 ---
 
+<a id="how-it-works"></a>
 ## How it works
 
 `wallet-rescue` finds candidates by signature, then **proves** each one before reporting it:
@@ -310,6 +324,7 @@ them into RAM, and hits that straddle chunk boundaries are never lost.
 
 ---
 
+<a id="troubleshooting"></a>
 ## Troubleshooting
 
 - **`externally-managed-environment` on pip install** → use a venv (above) or `--install-deps`.
@@ -323,6 +338,7 @@ them into RAM, and hits that straddle chunk boundaries are never lost.
 
 ---
 
+<a id="donations"></a>
 ## Donations
 
 `wallet-rescue` is free and open source. If it helped you get your coins back and you'd like to
@@ -339,6 +355,7 @@ Thank you, and good luck with your recovery. 🙏
 
 ---
 
+<a id="disclaimer"></a>
 ## Disclaimer
 
 Intended only for recovering wallets you have a right to (your own, or with explicit
