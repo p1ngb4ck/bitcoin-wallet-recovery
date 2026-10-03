@@ -15,7 +15,6 @@ wallets are **tested against your own password list**, and recovered addresses c
 
 ---
 
-<a id="table-of-contents"></a>
 ## Table of contents
 
 - [Features](#features)
@@ -35,7 +34,6 @@ wallets are **tested against your own password list**, and recovered addresses c
 
 ---
 
-<a id="features"></a>
 ## Features
 
 - 🧲 **Works on destroyed filesystems** — reads the raw byte stream, no mount, no wallet app.
@@ -54,7 +52,6 @@ wallets are **tested against your own password list**, and recovered addresses c
 
 ---
 
-<a id="supported-wallets-and-seed-types"></a>
 ## Supported wallets and seed types
 
 | Scheme | What it recovers |
@@ -82,7 +79,6 @@ wallets are **tested against your own password list**, and recovered addresses c
 
 ---
 
-<a id="installation"></a>
 ## Installation
 
 Ubuntu/Debian. A dedicated **virtualenv** is recommended so nothing touches the system Python.
@@ -109,19 +105,41 @@ pip install cryptography mnemonic
 
 ### Old Electrum (1.x) seed support
 
-Old Electrum wallets used their own 1626-word list. To detect a standalone **old** Electrum
-mnemonic, install Electrum into the same venv (it's used only as a word-list source):
+Old Electrum wallets use their own 1626-word list, so detecting a **standalone old Electrum
+mnemonic** needs Electrum itself as the word-list source. Electrum is **not** a regular PyPI
+package — install the **GPG-verified release tarball from electrum.org** into the same venv, as
+documented at <https://electrum.org/#download>:
 
 ```bash
 source ~/wallet-rescue-venv/bin/activate
-pip install electrum
+
+# use the current version shown on https://electrum.org/#download
+export VERSION=4.8.2
+
+# non-Python dependency Electrum needs
+sudo apt install -y libsecp256k1-dev
+
+# download the official tarball + signature
+wget https://download.electrum.org/$VERSION/Electrum-$VERSION.tar.gz
+wget https://download.electrum.org/$VERSION/Electrum-$VERSION.tar.gz.asc
+
+# verify the signature (first import ThomasV's key, linked on electrum.org/#download)
+gpg --verify Electrum-$VERSION.tar.gz.asc Electrum-$VERSION.tar.gz
+
+# install into the active venv
+python3 -m pip install Electrum-$VERSION.tar.gz
 ```
 
-No network / can't install Electrum? Point the tool at the word list instead:
+> ⚠️ **Only download Electrum from electrum.org and verify the GPG signature** — never from
+> PyPI or third-party mirrors.
+
+Don't want to install Electrum? It is only used for the old word list. Extract that list once
+(the 1626 words from Electrum's `old_mnemonic`) to a plain one-word-per-line file and point the
+tool at it instead:
 
 ```bash
 python wallet_rescue.py -i disk.img -s electrum-v4,mnemonic-file \
-  --electrum-old-wordlist /path/to/english_old.txt -o out
+  --electrum-old-wordlist /path/to/old_wordlist.txt -o out
 ```
 
 ### Verify the install
@@ -136,7 +154,6 @@ python wallet_rescue.py --selftest     # checks all crypto primitives against kn
 
 ---
 
-<a id="how-to-use"></a>
 ## How to use
 
 A typical end-to-end recovery:
@@ -168,7 +185,6 @@ python wallet_rescue.py -i disk.img -p password_list.txt -s '*' --check-balance 
 
 ---
 
-<a id="input-modes"></a>
 ## Input modes
 
 | Mode | Command | Notes |
@@ -191,7 +207,6 @@ sudo python wallet_rescue.py --scan-mounts -s all --max-file-mb 2048 -o rescue.o
 
 ---
 
-<a id="creating-a-disk-image"></a>
 ## Creating a disk image
 
 Image the source device **first** and never write to the original drive. `ddrescue` is more
@@ -211,7 +226,6 @@ disk attached.
 
 ---
 
-<a id="scheme-selection"></a>
 ## Scheme selection
 
 `-s` / `--schemes` takes a comma list of: exact id · wildcard · group · `all` · `*`
@@ -233,7 +247,6 @@ python wallet_rescue.py --list-schemes
 
 ---
 
-<a id="options"></a>
 ## Options
 
 | Option | Effect |
@@ -262,7 +275,6 @@ python wallet_rescue.py --list-schemes
 
 ---
 
-<a id="checking-balances-and-privacy"></a>
 ## Checking balances and privacy
 
 ```bash
@@ -285,7 +297,6 @@ P2SH-P2WPKH; old Electrum → its own derivation; Electrum 2.x → standard/segw
 
 ---
 
-<a id="output-files"></a>
 ## Output files
 
 Everything lands in the `-o` directory (created `0700`):
@@ -301,7 +312,6 @@ Everything lands in the `-o` directory (created `0700`):
 
 ---
 
-<a id="how-it-works"></a>
 ## How it works
 
 `wallet-rescue` finds candidates by signature, then **proves** each one before reporting it:
@@ -324,7 +334,6 @@ them into RAM, and hits that straddle chunk boundaries are never lost.
 
 ---
 
-<a id="troubleshooting"></a>
 ## Troubleshooting
 
 - **`externally-managed-environment` on pip install** → use a venv (above) or `--install-deps`.
@@ -332,13 +341,13 @@ them into RAM, and hits that straddle chunk boundaries are never lost.
 - **`cannot read /dev/sdX`** → raw block devices need root: run with `sudo`.
 - **API 403 / rate limiting** → use your own node via `--api-url`, or `--addresses-only`.
 - **BIP39 schemes skipped** → `pip install mnemonic` (Electrum seeds don't need it).
-- **Old Electrum mnemonic not detected** → `pip install electrum` or pass `--electrum-old-wordlist`.
+- **Old Electrum mnemonic not detected** → install Electrum from electrum.org into the venv
+  (see [Installation](#installation)) or pass `--electrum-old-wordlist`.
 - **Scan seems stuck** → it's working; the single progress line shows %, MB/s and ETA. Large
   disks simply take a while.
 
 ---
 
-<a id="donations"></a>
 ## Donations
 
 `wallet-rescue` is free and open source. If it helped you get your coins back and you'd like to
@@ -355,7 +364,6 @@ Thank you, and good luck with your recovery. 🙏
 
 ---
 
-<a id="disclaimer"></a>
 ## Disclaimer
 
 Intended only for recovering wallets you have a right to (your own, or with explicit
