@@ -453,7 +453,9 @@ RE_TEXTRUN = re.compile(rb"[\t\n\r\x20-\x7e]{40,}")  # printable + whitespace (s
 RE_HEX64 = re.compile(rb"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
 # OpenSSL/Bitcoin-Core DER EC private key (pywallet --recover signature):
 # SEQUENCE(0x81d3) INTEGER 1 OCTETSTRING(32)=secret [0]=curve params ...
-RE_DER = re.compile(rb"\x30\x81\xd3\x02\x01\x01\x04\x20(.{32})\xa0\x81\x85\x30\x81\x82", re.DOTALL)
+# both on-disk EC key DER layouts: 30 81 D3 (214B, compressed pubkey) and
+# 30 82 01 13 (279B, uncompressed pubkey, older wallets); same param block follows the key
+RE_DER = re.compile(rb"(?:\x30\x81\xd3|\x30\x82\x01\x13)\x02\x01\x01\x04\x20(.{32})\xa0\x81\x85\x30\x81\x82", re.DOTALL)
 RE_WORDS = re.compile(r"[a-z]+")
 RE_WORDBLOB = re.compile(rb"(?<![A-Za-z \t\r\n])[A-Za-z][A-Za-z \t\r\n]{30,400}[A-Za-z](?![A-Za-z \t\r\n])")
 
@@ -847,7 +849,7 @@ class Carver:
                 if not (0 < v < _N):
                     continue
                 # cross-check the uncompressed pubkey embedded later in the DER blob
-                tail = view[m.start():m.start() + 220]
+                tail = view[m.start():m.start() + 300]
                 pm = tail.find(b"\x03\x42\x00\x04")
                 if pm != -1 and pm + 4 + 64 <= len(tail):
                     if tail[pm + 4:pm + 4 + 64] != pub_from_priv(secret, False)[1:]:
